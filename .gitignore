@@ -1,0 +1,16 @@
+# PyCharm / IntelliJ
+.idea/
+
+# Python cache
+processing/__pycache__/
+*.pyc
+
+# Model / cache files
+Files/*.pkl
+
+# OS junk
+.DS_Store
+
+# Env files (if you make a venv inside project)
+movie/
+
