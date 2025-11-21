@@ -17,7 +17,7 @@ Our Movie Recommender System, built using Python and Natural Language Processing
 ## Try the App
 
 Explore the Movie Recommender System yourself! Our app is deployed on Streamlit. Click the link below to get started:
-[**Movie Recommender System App**]()
+[**Movie Recommender System App**](https://movie-recommend0.streamlit.app/)
 
 ## Installation Guide
 
@@ -26,7 +26,7 @@ Follow these steps to set up and run the application:
 1. **Clone the Repository:**
 
    ```bash
-   git clone https://github.com/AnupamMittal-21/Movie-Recommender-System.git
+   git clone https://github.com/tanishq2520/Movie_recommender.git
    ```
 
 2. **Create a Virtual Environment:**
