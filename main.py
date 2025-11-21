@@ -1,8 +1,10 @@
 import streamlit as st
+import asyncio
+import pickle
+import pandas as pd
 from streamlit_extras.stoggle import stoggle
 from processing import preprocess
-from processing.display import Main
-import base64
+from processing import display
 
 st.set_page_config(
     page_title="Movie Recommender",
@@ -10,8 +12,34 @@ st.set_page_config(
     layout="wide"
 )
 
-def set_background_and_style(poster_url=None):
+display.check_and_build_files()
+
+@st.cache_resource
+def load_data():
+    pickle_file_path = r'Files/new_df_dict.pkl'
+    with open(pickle_file_path, 'rb') as pickle_file:
+        loaded_dict = pickle.load(pickle_file)
+    new_df = pd.DataFrame.from_dict(loaded_dict)
+
+    sim_paths = {
+        'General (Tags)': r'Files/similarity_tags_tags.pkl',
+        'Genre': r'Files/similarity_tags_genres.pkl',
+        'Cast': r'Files/similarity_tags_tcast.pkl',
+        'Production Company': r'Files/similarity_tags_tprduction_comp.pkl',
+        'Keywords': r'Files/similarity_tags_keywords.pkl',
+        'Director': r'Files/similarity_tags_tcrew.pkl',
+    }
     
+    loaded_sims = {}
+    for key, path in sim_paths.items():
+        with open(path, 'rb') as f:
+            loaded_sims[key] = pickle.load(f)
+            
+    return new_df, loaded_sims
+
+new_df, similarity_matrices = load_data()
+
+def set_background_and_style(poster_url=None):
     if poster_url:
         bg_image_style = f"""
             background-image: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0.5)), url("{poster_url}");
@@ -113,8 +141,6 @@ def set_background_and_style(poster_url=None):
     </style>
     """, unsafe_allow_html=True)
 
-
-
 if 'view_state' not in st.session_state:
     st.session_state['view_state'] = 'idle'
 if 'search_movie' not in st.session_state:
@@ -131,11 +157,6 @@ if 'cached_basis_str' not in st.session_state:
     st.session_state['cached_basis_str'] = ""
 
 def main():
-    with Main() as bot:
-        bot.main_()
-        new_df, movies, movies2 = bot.getter()
-    
-
     st.markdown('<p class="title-text">🎬 🍿 Movie Recommender</p>', unsafe_allow_html=True)
 
     col_movie, col_basis = st.columns([7, 3])
@@ -182,24 +203,24 @@ def main():
         st.session_state['search_basis'] = basis
         st.session_state['detail_movie'] = None
         
-        basis_mapping = {
-            'General (Tags)': (r'Files/similarity_tags_tags.pkl', "are"),
-            'Genre': (r'Files/similarity_tags_genres.pkl', "on the basis of genres are"),
-            'Cast': (r'Files/similarity_tags_tcast.pkl', "on the basis of cast are"),
-            'Production Company': (r'Files/similarity_tags_tprduction_comp.pkl', "from the same production company are"),
-            'Keywords': (r'Files/similarity_tags_keywords.pkl', "on the basis of keywords are"),
-            'Director': (r'Files/similarity_tags_tcrew.pkl', "directed by the same person are"),
+        basis_text_map = {
+            'General (Tags)': "are",
+            'Genre': "on the basis of genres are",
+            'Cast': "on the basis of cast are",
+            'Production Company': "from the same production company are",
+            'Keywords': "on the basis of keywords are",
+            'Director': "directed by the same person are",
         }
         
-        selected_path, selected_str = basis_mapping[basis]
-        
+        selected_matrix = similarity_matrices[basis]
         
         with st.spinner('Analyzing content...'):
-            movies, posters = preprocess.recommend(new_df, selected_movie, selected_path)
+            rec_names, rec_ids = preprocess.recommend(new_df, selected_movie, selected_matrix)
+            rec_posters = asyncio.run(preprocess.fetch_posters_async(rec_ids))
         
-        st.session_state['cached_movies'] = movies
-        st.session_state['cached_posters'] = posters
-        st.session_state['cached_basis_str'] = selected_str
+        st.session_state['cached_movies'] = rec_names
+        st.session_state['cached_posters'] = rec_posters
+        st.session_state['cached_basis_str'] = basis_text_map[basis]
 
     if desc_pressed:
         st.session_state['view_state'] = 'describe'
@@ -278,11 +299,14 @@ def render_description():
     st.divider()
     st.subheader("Cast")
     
-    cast_ids = info[14]
+    cast_ids = info[14][:5]
+    
+    with st.spinner('Loading cast...'):
+        cast_data = asyncio.run(preprocess.fetch_cast_details_async(cast_ids))
+
     c_cols = st.columns(5)
-    for i in range(min(5, len(cast_ids))):
-        person_id = cast_ids[i]
-        url, biography = preprocess.fetch_person_details(person_id)
+    for i in range(min(5, len(cast_data))):
+        url, biography = cast_data[i]
         with c_cols[i]:
             st.image(url, width="stretch")
             stoggle("Bio", biography)

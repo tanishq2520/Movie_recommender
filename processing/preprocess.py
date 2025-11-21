@@ -4,15 +4,16 @@ import pandas as pd
 import ast
 import requests
 import nltk
+import aiohttp
+import asyncio
 from nltk.corpus import stopwords
 from nltk.stem.porter import PorterStemmer
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# Object for porterStemmer
 ps = PorterStemmer()
 
-# Ensure stopwords are downloaded safely
+# Ensure stopwords are downloaded
 try:
     nltk.data.find('corpora/stopwords')
 except LookupError:
@@ -56,65 +57,63 @@ def get_crew(obj):
 
 
 def read_csv_to_df():
-    # Reading both the csv files
-    # Ensure your file paths match these exactly
+    # Reading the CSV files
     credit_ = pd.read_csv(r'Files/tmdb_5000_credits.csv')
     movies = pd.read_csv(r'Files/tmdb_5000_movies.csv')
 
-    # Merging the dataframes
+    # Merging
     movies = movies.merge(credit_, on='title')
 
-    # Create movies2 for details usage later
+    # Create movies2 for the Details page (contains full info)
     movies2 = movies.copy()
     movies2.drop(['homepage', 'tagline'], axis=1, inplace=True)
     movies2 = movies2[['movie_id', 'title', 'budget', 'overview', 'popularity', 'release_date', 'revenue', 'runtime',
                        'spoken_languages', 'status', 'vote_average', 'vote_count']]
 
-    # Extracting important and relevant features
-    movies = movies[
-        ['movie_id', 'title', 'overview', 'genres', 'keywords', 'cast', 'crew', 'production_companies', 'release_date']]
-
-    # --- CRITICAL FIX: DROP NA AND RESET INDEX ---
-    # This fixes the "IndexError: index out of bounds"
+    # Create movies dataframe for Analysis (Math)
+    movies = movies[['movie_id', 'title', 'overview', 'genres', 'keywords', 'cast', 'crew', 'production_companies', 'release_date']]
+    
+    # Critical: Drop NA and reset index to align matrices
     movies.dropna(inplace=True)
     movies.reset_index(drop=True, inplace=True)
-    # ---------------------------------------------
 
-    # Applying functions to convert from list string to list of items
+    # Extracting items from JSON strings
     movies['genres'] = movies['genres'].apply(get_genres)
     movies['keywords'] = movies['keywords'].apply(get_genres)
     movies['top_cast'] = movies['cast'].apply(get_cast)
     movies['director'] = movies['crew'].apply(get_crew)
     movies['prduction_comp'] = movies['production_companies'].apply(get_genres)
 
-    # Removing spaces from between the words (e.g., "Sci Fi" -> "SciFi")
+    # 1. Split Overview
     movies['overview'] = movies['overview'].apply(lambda x: x.split())
+    
+    # 2. Remove Spaces (CRITICAL for Director/Cast logic)
+    # "John Lasseter" -> "JohnLasseter"
     movies['genres'] = movies['genres'].apply(lambda x: [i.replace(" ", "") for i in x])
     movies['keywords'] = movies['keywords'].apply(lambda x: [i.replace(" ", "") for i in x])
     movies['tcast'] = movies['top_cast'].apply(lambda x: [i.replace(" ", "") for i in x])
     movies['tcrew'] = movies['director'].apply(lambda x: [i.replace(" ", "") for i in x])
     movies['tprduction_comp'] = movies['prduction_comp'].apply(lambda x: [i.replace(" ", "") for i in x])
 
-    # Creating 'tags' where we have all the words together for analysis
+    # 3. Create the 'tags' column (Bag of Words)
     movies['tags'] = movies['overview'] + movies['genres'] + movies['keywords'] + movies['tcast'] + movies['tcrew']
 
-    # Creating new dataframe for the analysis part only
+    # 4. Create the new_df for vectorization
     new_df = movies[['movie_id', 'title', 'tags', 'genres', 'keywords', 'tcast', 'tcrew', 'tprduction_comp']].copy()
 
-    # Join lists back into strings for vectorization
+    # 5. Join lists back to strings for CountVectorizer
     new_df['genres'] = new_df['genres'].apply(lambda x: " ".join(x))
     new_df['tcast'] = new_df['tcast'].apply(lambda x: " ".join(x))
     new_df['tprduction_comp'] = new_df['tprduction_comp'].apply(lambda x: " ".join(x))
-
     new_df['tcrew'] = new_df['tcrew'].apply(lambda x: " ".join(x))
 
-    # Lowercase everything for consistency
+    # 6. Lowercase everything
     new_df['tcast'] = new_df['tcast'].apply(lambda x: x.lower())
     new_df['genres'] = new_df['genres'].apply(lambda x: x.lower())
     new_df['tprduction_comp'] = new_df['tprduction_comp'].apply(lambda x: x.lower())
     new_df['tcrew'] = new_df['tcrew'].apply(lambda x: x.lower())
 
-    # Applying stemming
+    # 7. Apply Stemming to tags and keywords
     new_df['tags'] = new_df['tags'].apply(stemming_stopwords)
     new_df['keywords'] = new_df['keywords'].apply(stemming_stopwords)
 
@@ -126,7 +125,7 @@ def stemming_stopwords(li):
     for i in li:
         ans.append(ps.stem(i))
 
-    # Removing Stopwords
+    # Remove Stopwords
     stop_words = set(stopwords.words('english'))
     filtered_sentence = []
     for w in ans:
@@ -139,32 +138,103 @@ def stemming_stopwords(li):
         if len(i) > 2:
             str_ = str_ + i + ' '
 
-    # Removing Punctuations
+    # Remove Punctuation
     punc = string.punctuation
     str_ = str_.translate(str_.maketrans('', '', punc))
     return str_
 
 
-def fetch_posters(movie_id):
+# --- ASYNC FUNCTIONS FOR SPEED ---
+
+async def fetch_single_poster_async(session, movie_id):
     try:
         url = 'https://api.themoviedb.org/3/movie/{}?api_key=6177b4297dff132d300422e0343471fb'.format(movie_id)
-        # Timeout added to prevent hanging if internet is slow
-        response = requests.get(url, timeout=5)
+        async with session.get(url) as response:
+            data = await response.json()
+            if 'poster_path' in data and data['poster_path']:
+                # Using w342 for grid (faster load)
+                return "https://image.tmdb.org/t/p/w342/" + data['poster_path']
+            else:
+                return "https://via.placeholder.com/342x513?text=No+Image"
+    except:
+        return "https://via.placeholder.com/342x513?text=No+Image"
+
+async def fetch_posters_async(movie_ids):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for movie_id in movie_ids:
+            tasks.append(fetch_single_poster_async(session, movie_id))
+        return await asyncio.gather(*tasks)
+
+async def fetch_person_details_async(session, person_id):
+    try:
+        url = 'https://api.themoviedb.org/3/person/{}?api_key=6177b4297dff132d300422e0343471fb'.format(person_id)
+        async with session.get(url) as response:
+            data = await response.json()
+            
+            if 'profile_path' in data and data['profile_path']:
+                # w185 for cast circles (very fast)
+                img_url = 'https://image.tmdb.org/t/p/w185/' + data['profile_path']
+            else:
+                img_url = "https://via.placeholder.com/185x278?text=No+Image"
+                
+            biography = data.get('biography', "No biography available.")
+            return img_url, biography
+    except:
+        return "https://via.placeholder.com/185x278?text=Error", "Could not fetch details."
+
+async def fetch_cast_details_async(cast_ids):
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for pid in cast_ids:
+            tasks.append(fetch_person_details_async(session, pid))
+        return await asyncio.gather(*tasks)
+
+
+# --- SYNCHRONOUS HELPER FUNCTIONS ---
+
+def fetch_posters(movie_id):
+    # This is used for the Background Image (Higher Quality)
+    try:
+        url = 'https://api.themoviedb.org/3/movie/{}?api_key=6177b4297dff132d300422e0343471fb'.format(movie_id)
+        response = requests.get(url, timeout=3)
         data = response.json()
+        # w780 for background
         str_ = "https://image.tmdb.org/t/p/w780/" + data['poster_path']
     except:
-        # Fallback image if API fails or no poster exists
         str_ = "https://via.placeholder.com/500x750?text=No+Image"
     return str_
 
-
-def recommend(new_df, movie, pickle_file_path):
-    with open(pickle_file_path, 'rb') as pickle_file:
-        similarity_tags = pickle.load(pickle_file)
-
+def fetch_person_details(id_):
+    # Fallback synchronous method
     try:
-        # Find the index of the movie
-        # Because we reset_index in read_csv_to_df, these indices now align perfectly
+        url = 'https://api.themoviedb.org/3/person/{}?api_key=6177b4297dff132d300422e0343471fb'.format(id_)
+        data = requests.get(url, timeout=3).json()
+
+        if 'profile_path' in data and data['profile_path']:
+            url = 'https://image.tmdb.org/t/p/w185/' + data['profile_path']
+        else:
+            url = "https://via.placeholder.com/185x278?text=No+Image"
+
+        biography = data.get('biography', "No biography available.")
+    except:
+        url = "https://via.placeholder.com/185x278?text=Error"
+        biography = "Could not fetch details."
+
+    return url, biography
+
+
+# --- MAIN RECOMMENDATION LOGIC ---
+
+def vectorise(new_df, col_name):
+    # This is the logic used to build the pickle files
+    cv = CountVectorizer(max_features=5000, stop_words='english')
+    vec_tags = cv.fit_transform(new_df[col_name]).toarray()
+    sim_bt = cosine_similarity(vec_tags)
+    return sim_bt
+
+def recommend(new_df, movie, similarity_matrix):
+    try:
         idx_series = new_df[new_df['title'] == movie].index
         
         if idx_series.empty:
@@ -172,55 +242,28 @@ def recommend(new_df, movie, pickle_file_path):
             
         movie_idx = idx_series[0]
 
-        # Getting the top 25 movies based on similarity scores
-        distances = similarity_tags[movie_idx]
-        movie_list = sorted(list(enumerate(distances)), reverse=True, key=lambda x: x[1])[1:26]
+        distances = similarity_matrix[movie_idx]
+        
+        # Get top 5
+        movie_list = sorted(list(enumerate(distances)), reverse=True, key=lambda x: x[1])[1:6]
 
-        rec_movie_list = []
-        rec_poster_list = []
+        rec_movie_names = []
+        rec_movie_ids = []
 
         for i in movie_list:
-            # Fetch title
-            rec_movie_list.append(new_df.iloc[i[0]]['title'])
-            # Fetch poster
-            rec_poster_list.append(fetch_posters(new_df.iloc[i[0]]['movie_id']))
+            rec_movie_names.append(new_df.iloc[i[0]]['title'])
+            rec_movie_ids.append(new_df.iloc[i[0]]['movie_id'])
 
-        return rec_movie_list, rec_poster_list
+        return rec_movie_names, rec_movie_ids
 
     except IndexError:
         return [], []
     except Exception as e:
-        print(f"Error in recommendation: {e}")
+        print(f"Error: {e}")
         return [], []
 
-
-def vectorise(new_df, col_name):
-    cv = CountVectorizer(max_features=5000, stop_words='english')
-    vec_tags = cv.fit_transform(new_df[col_name]).toarray()
-    sim_bt = cosine_similarity(vec_tags)
-    return sim_bt
-
-
-def fetch_person_details(id_):
-    try:
-        url = 'https://api.themoviedb.org/3/person/{}?api_key=6177b4297dff132d300422e0343471fb'.format(id_)
-        data = requests.get(url, timeout=5).json()
-
-        if 'profile_path' in data and data['profile_path']:
-            url = 'https://image.tmdb.org/t/p/w220_and_h330_face' + data['profile_path']
-        else:
-            url = "https://via.placeholder.com/220x330?text=No+Image"
-
-        biography = data.get('biography', "No biography available.")
-    except:
-        url = "https://via.placeholder.com/220x330?text=Error"
-        biography = "Could not fetch details."
-
-    return url, biography
-
-
 def get_details(selected_movie_name):
-    # Load the dictionaries
+    # Loading Dictionaries specifically for details
     pickle_file_path = r'Files/movies_dict.pkl'
     with open(pickle_file_path, 'rb') as pickle_file:
         loaded_dict = pickle.load(pickle_file)
@@ -231,14 +274,12 @@ def get_details(selected_movie_name):
         loaded_dict_2 = pickle.load(pickle_file)
     movies2 = pd.DataFrame.from_dict(loaded_dict_2)
 
-    # Find the movie rows
     a = movies2[movies2['title'] == selected_movie_name]
     b = movies[movies['title'] == selected_movie_name]
 
     if a.empty or b.empty:
         return None
 
-    # Helper to safely get value
     def get_val(df, col):
         if not df.empty:
             return df.iloc[0][col]
@@ -264,6 +305,7 @@ def get_details(selected_movie_name):
     except:
         genres = []
         
+    # Note: We use fetch_posters (Sync) here for the big detail image
     this_poster = fetch_posters(movie_id)
     
     cast_per = get_val(b, 'cast')
